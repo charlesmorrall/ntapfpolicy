@@ -6,6 +6,9 @@ $cluster = "cluster" # The Netapp FAS2520 system
 
 $securePassword = ConvertTo-SecureString “myPassword” -AsPlainText -Force
 $cred = New-Object -TypeName System.Management.Automation.PSCredential ("admin",$securePassword)
+
+$fpolicyName = "p_ransomware"
+$fpolicyEvent = "e_ransomware"
      
 
 # Using this site as a somewhat comprehesive list of known ransomware file name patterns
@@ -48,20 +51,33 @@ $existingFpolicyScope = Get-NcFpolicyScope
 
 $dataSVMs = Get-NcVserver | Where-Object {$_.VserverType -eq "data"}
 
+if ($existingFpolicyPolicy) # There has to be at least one existing Fpolicy, otherwise the compare-object will error out
+{
+    $newDataSVMs = Compare-Object -ReferenceObject $dataSVMs -DifferenceObject $existingFpolicyPolicy -Property Vserver
+}
+else
+{
+    $newDataSVMs = $dataSVMs # All SVMs are new
+}
+
 $sequenceNumber = 1
 
+# Apply Fpolicy scope for all CIFS volumes for all SVMS
 foreach ($dataSVM in $dataSVMs)
 {
+    if ($newDataSVMs.Vserver -contains $dataSVM.Vserver) # Create policy and event for each new SVM
+    {
+        New-NcFpolicyEvent -Name $fpolicyEvent -Protocol cifs -FileOperation ("create","rename") -VserverContext $dataSVM
+        New-NcFpolicyPolicy -Name $fpolicyName -Event $fpolicyEvent -EngineName native -VserverContext $dataSVM
+        New-NcFpolicyScope -PolicyName $fpolicyName -VserverContext $dataSVM
+        
+    }
+
     $dataVolsCIFS = Get-NcVol -Vserver $dataSVM | Where-Object {$_.VolumeSecurityAttributes.Style -eq "ntfs" -and $_.Name -notmatch "root"}
     
-    New-NcFpolicyEvent -Name e_ransomware -Protocol cifs -FileOperation ("create","rename") -VserverContext $dataSVM
-    $fpolicy = New-NcFpolicyPolicy -Name p_ransomware -Event e_ransomware -EngineName native -VserverContext $dataSVM 
-    
-    $fpolicyScope = New-NcFpolicyScope -PolicyName p_ransomware -VserverContext $dataSVM
-    
-    Set-NcFpolicyScope -PolicyName $fpolicy.PolicyName -VolumesToInclude $dataVolsCIFS -FileExtensionsToInclude $badExtensions -FileExtensionsToExclude $goodExtensions -VserverContext $dataSVM
+    Set-NcFpolicyScope -PolicyName $fpolicyName -VolumesToInclude $dataVolsCIFS -FileExtensionsToInclude $badExtensions -FileExtensionsToExclude $goodExtensions -VserverContext $dataSVM
 
-    Enable-NcFpolicyPolicy $fpolicy.PolicyName -SequenceNumber $sequenceNumber -VserverContext $dataSVM
+    Enable-NcFpolicyPolicy $fpolicyName -SequenceNumber $sequenceNumber -VserverContext $dataSVM -ErrorAction SilentlyContinue # Silently continue on error "policy is already enabled"Get
     $sequenceNumber++
 }
 
